@@ -4,14 +4,15 @@
 //! [`Runtime::block_on`] to drive a top-level future, or [`Runtime::spawn`]
 //! to submit background tasks.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::future::Future;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use crate::executor::{next_task_id, Executor};
+use crate::executor::Executor;
 use crate::join_handle::JoinHandle;
 use crate::net;
+use crate::next_task_id;
 use crate::reactor::{self, SharedReactor};
 use crate::task::{self, Task, TaskState};
 use crate::timer::{self, SharedTimerWheel, Sleep};
@@ -119,23 +120,28 @@ impl Runtime {
         let mut handle = handle;
         let mut handle = std::pin::Pin::new(&mut handle);
 
+        // Use a flag-setting waker so we only re-poll the JoinHandle when
+        // the underlying task has actually completed and woken us.
+        let handle_woken = Rc::new(Cell::new(true)); // start as true to poll once
+        let waker = flag_waker(Rc::clone(&handle_woken));
+        let mut cx = std::task::Context::from_waker(&waker);
+
         loop {
             // 1. Run all ready tasks.
             while self.executor.tick() {}
 
-            // 2. Check if our top-level future is done.
-            //    We create a no-op waker just to check the JoinHandle state.
-            let waker = noop_waker();
-            let mut cx = std::task::Context::from_waker(&waker);
-            if let std::task::Poll::Ready(val) = handle.as_mut().poll(&mut cx) {
-                return val;
+            // 2. Check if our top-level future is done (only if woken).
+            if handle_woken.get() {
+                handle_woken.set(false);
+                if let std::task::Poll::Ready(val) = handle.as_mut().poll(&mut cx) {
+                    return val;
+                }
             }
 
             // 3. If no tasks remain (other than possibly the handle), bail out
             //    to avoid spinning forever.
             if self.executor.is_empty() {
-                let waker = noop_waker();
-                let mut cx = std::task::Context::from_waker(&waker);
+                // The root task finished — result must be stored.
                 if let std::task::Poll::Ready(val) = handle.as_mut().poll(&mut cx) {
                     return val;
                 }
@@ -146,7 +152,6 @@ impl Runtime {
 
             // 5. If there are ready tasks after timer processing, skip blocking.
             if !self.executor.ready_queue.borrow().is_empty() {
-                // ReadyQueue::is_empty() is O(1)
                 continue;
             }
 
@@ -160,7 +165,7 @@ impl Runtime {
             } else {
                 // No timers, but tasks are alive — use a short timeout so we
                 // don't miss wakeups from non-I/O sources (e.g. channels).
-                Some(Duration::from_millis(10))
+                Some(Duration::from_millis(5))
             };
 
             let _ = self.reactor.poll(timeout);
@@ -170,8 +175,6 @@ impl Runtime {
         }
 
         // Final attempt to extract the result.
-        let waker = noop_waker();
-        let mut cx = std::task::Context::from_waker(&waker);
         match handle.as_mut().poll(&mut cx) {
             std::task::Poll::Ready(val) => val,
             std::task::Poll::Pending => {
@@ -181,20 +184,40 @@ impl Runtime {
     }
 }
 
-/// Build a no-op waker using the RawWaker API.
+/// Build a waker that sets a flag when woken.
 ///
-/// Used only inside `block_on` to probe the JoinHandle without
-/// registering any real wake-up interest.
-fn noop_waker() -> std::task::Waker {
+/// Used by `block_on` to know when the JoinHandle's underlying task has
+/// completed, avoiding redundant polls on every loop iteration.
+fn flag_waker(flag: Rc<Cell<bool>>) -> std::task::Waker {
     use std::task::{RawWaker, RawWakerVTable};
 
-    const NOOP_VTABLE: RawWakerVTable = RawWakerVTable::new(
-        |_| RawWaker::new(std::ptr::null(), &NOOP_VTABLE), // clone
-        |_| {},                                            // wake
-        |_| {},                                            // wake_by_ref
-        |_| {},                                            // drop
+    const VTABLE: RawWakerVTable = RawWakerVTable::new(
+        // clone
+        |ptr| {
+            let flag = unsafe { Rc::from_raw(ptr as *const Cell<bool>) };
+            let cloned = flag.clone();
+            std::mem::forget(flag); // don't drop the original
+            RawWaker::new(Rc::into_raw(cloned) as *const (), &VTABLE)
+        },
+        // wake (by value)
+        |ptr| {
+            let flag = unsafe { Rc::from_raw(ptr as *const Cell<bool>) };
+            flag.set(true);
+            // flag is dropped here (decrements refcount)
+        },
+        // wake_by_ref
+        |ptr| {
+            let flag = unsafe { &*(ptr as *const Cell<bool>) };
+            flag.set(true);
+        },
+        // drop
+        |ptr| {
+            unsafe { Rc::from_raw(ptr as *const Cell<bool>) };
+            // dropped, decrements refcount
+        },
     );
 
-    // SAFETY: the vtable does nothing, so no invariants can be violated.
-    unsafe { std::task::Waker::from_raw(RawWaker::new(std::ptr::null(), &NOOP_VTABLE)) }
+    let ptr = Rc::into_raw(flag) as *const ();
+    // SAFETY: the vtable correctly manages the Rc<Cell<bool>> lifetime.
+    unsafe { std::task::Waker::from_raw(RawWaker::new(ptr, &VTABLE)) }
 }

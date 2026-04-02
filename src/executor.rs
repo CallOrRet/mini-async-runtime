@@ -19,7 +19,6 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
 use crate::task::Task;
@@ -124,14 +123,6 @@ unsafe fn waker_drop(ptr: *const ()) {
 // ---------------------------------------------------------------------------
 // Executor
 // ---------------------------------------------------------------------------
-
-/// Global task-id counter.
-static NEXT_TASK_ID: AtomicUsize = AtomicUsize::new(1);
-
-/// Allocate a unique task id.
-pub(crate) fn next_task_id() -> usize {
-    NEXT_TASK_ID.fetch_add(1, Ordering::Relaxed)
-}
 
 /// The executor that drives tasks to completion.
 pub(crate) struct Executor {

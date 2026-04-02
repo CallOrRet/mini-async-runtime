@@ -24,6 +24,7 @@
 //! ```
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::panic::{self, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
@@ -33,12 +34,7 @@ use super::net::SharedReactor;
 use super::task::{Task, IDLE, NOTIFIED, RUNNING, SCHEDULED};
 use super::timer::TimerWheel;
 
-/// Global monotonic counter for unique task IDs.
-static NEXT_TASK_ID: AtomicUsize = AtomicUsize::new(1);
-
-pub(crate) fn next_task_id() -> usize {
-    NEXT_TASK_ID.fetch_add(1, Ordering::Relaxed)
-}
+pub(crate) use crate::next_task_id;
 
 // ---------------------------------------------------------------------------
 // Ready queue with deduplication
@@ -295,16 +291,27 @@ fn poll_task(task_id: usize, shared: &Arc<SharedState>) {
 
     // SAFETY: we just CAS-ed into RUNNING — we are the only thread that
     // will touch the future until we leave RUNNING.
-    let result = unsafe { task.poll(&mut cx) };
+    //
+    // We wrap the poll in `catch_unwind` so that a panicking task does not
+    // tear down the entire worker thread (and potentially hang `block_on`).
+    let poll_result = panic::catch_unwind(AssertUnwindSafe(|| unsafe { task.poll(&mut cx) }));
 
-    match result {
-        Poll::Ready(()) => {
+    match poll_result {
+        Ok(Poll::Ready(())) => {
             // Task is done — remove it.
             shared.tasks.lock().unwrap().remove(&task_id);
             shared.active_count.fetch_sub(1, Ordering::Relaxed);
             shared.condvar.notify_all();
         }
-        Poll::Pending => {
+        Err(_panic) => {
+            // Task panicked — treat it as completed so we don't poll it
+            // again, and avoid crashing the worker thread.
+            eprintln!("mini-async-runtime: task {task_id} panicked");
+            shared.tasks.lock().unwrap().remove(&task_id);
+            shared.active_count.fetch_sub(1, Ordering::Relaxed);
+            shared.condvar.notify_all();
+        }
+        Ok(Poll::Pending) => {
             // Try RUNNING → IDLE.
             if task
                 .state
@@ -338,11 +345,7 @@ fn drive_io(shared: &SharedState) {
         if shared.timers.has_pending() {
             Some(next_deadline.unwrap_or(Duration::from_millis(1)))
         } else {
-            // Use a bounded timeout instead of blocking indefinitely.
-            // With edge-triggered eventfd, a wake() that fires between the
-            // driver checking the ready queue and entering epoll_wait can be
-            // missed, causing an infinite block.
-            Some(Duration::from_millis(5))
+            Some(next_deadline.unwrap_or(Duration::from_millis(5)))
         }
     };
 

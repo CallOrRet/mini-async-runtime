@@ -116,12 +116,15 @@ impl Reactor {
             return Err(io::Error::last_os_error());
         }
 
-        // Register the eventfd with epoll.  Use the fd itself as the data
-        // field — fd values are unique per-process, so no magic numbers needed.
+        // Register the eventfd with epoll using **level-triggered** mode.
+        // Edge-triggered would risk missing a wake() that fires between the
+        // driver checking the ready queue and entering epoll_wait.
+        // Level-triggered ensures epoll_wait always returns while the eventfd
+        // counter is non-zero.
         epoll.ctl(
             libc::EPOLL_CTL_ADD,
             wake_fd,
-            libc::EPOLLIN as u32 | libc::EPOLLET as u32,
+            libc::EPOLLIN as u32,
             wake_fd as u64,
         )?;
 
@@ -161,11 +164,12 @@ impl Reactor {
             write_waker: None,
         });
 
-        if is_read {
-            reg.read_waker = Some(waker);
+        // Save the old waker so we can rollback on epoll_ctl failure.
+        let old_waker = if is_read {
+            reg.read_waker.replace(waker)
         } else {
-            reg.write_waker = Some(waker);
-        }
+            reg.write_waker.replace(waker)
+        };
 
         let mut mask = 0;
         if reg.read_waker.is_some() {
@@ -182,7 +186,21 @@ impl Reactor {
             libc::EPOLL_CTL_MOD
         };
 
-        self.epoll.ctl(op, fd, mask, fd as u64)
+        let result = self.epoll.ctl(op, fd, mask, fd as u64);
+        if result.is_err() {
+            // Rollback: restore the old waker so the map stays consistent.
+            let reg = regs.get_mut(&fd).unwrap();
+            if is_read {
+                reg.read_waker = old_waker;
+            } else {
+                reg.write_waker = old_waker;
+            }
+            // If this was a new entry and epoll_ctl(ADD) failed, remove it.
+            if is_new {
+                regs.remove(&fd);
+            }
+        }
+        result
     }
 
     /// Remove all interest in `fd`.
@@ -207,27 +225,39 @@ impl Reactor {
         let mut events = [libc::epoll_event { events: 0, u64: 0 }; 64];
         let n = self.epoll.wait(&mut events, timeout_ms)?;
 
-        // 2. Dispatch events — lock held briefly.
-        for event in &events[..n] {
-            let fd = event.u64 as RawFd;
+        //    it.  This avoids calling arbitrary waker code while holding the
+        //    registrations mutex, preventing potential deadlocks if a waker
+        //    implementation ever needs to re-enter the reactor.
+        let wakers_to_wake = {
+            let mut regs = self.registrations.lock().unwrap();
+            let mut wakers = Vec::with_capacity(events.len());
+            for event in &events[..n] {
+                let fd = event.u64 as RawFd;
 
-            // Skip the wake eventfd — just drain it.
-            if fd == self.wake_fd {
-                Self::drain_wake_fd(self.wake_fd);
-                continue;
-            }
-            if let Some(reg) = self.registrations.lock().unwrap().get_mut(&fd) {
-                if event.events & READABLE != 0 {
-                    if let Some(waker) = reg.read_waker.take() {
-                        waker.wake();
+                // Skip the wake eventfd — just drain it.
+                if fd == self.wake_fd {
+                    Self::drain_wake_fd(self.wake_fd);
+                    continue;
+                }
+                if let Some(reg) = regs.get_mut(&fd) {
+                    if event.events & READABLE != 0 {
+                        if let Some(waker) = reg.read_waker.take() {
+                            wakers.push(waker);
+                        }
+                    }
+                    if event.events & WRITABLE != 0 {
+                        if let Some(waker) = reg.write_waker.take() {
+                            wakers.push(waker);
+                        }
                     }
                 }
-                if event.events & WRITABLE != 0 {
-                    if let Some(waker) = reg.write_waker.take() {
-                        waker.wake();
-                    }
-                }
             }
+            wakers
+            // lock released here
+        };
+
+        for waker in wakers_to_wake {
+            waker.wake();
         }
 
         Ok(())

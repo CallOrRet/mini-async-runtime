@@ -40,6 +40,17 @@ mod runtime;
 pub use join_handle::JoinHandle;
 pub use runtime::Runtime;
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// Global task-id counter shared by both single-threaded and multi-threaded
+/// runtimes, ensuring IDs never collide even when both runtimes are in use.
+static NEXT_TASK_ID: AtomicUsize = AtomicUsize::new(1);
+
+/// Allocate a process-wide unique task id.
+pub(crate) fn next_task_id() -> usize {
+    NEXT_TASK_ID.fetch_add(1, Ordering::Relaxed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
