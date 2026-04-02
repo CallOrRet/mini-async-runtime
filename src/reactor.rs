@@ -208,7 +208,6 @@ impl Reactor {
         let n = self.epoll.wait(&mut events, timeout_ms)?;
 
         // 2. Dispatch events — lock held briefly.
-        let mut regs = self.registrations.lock().unwrap();
         for event in &events[..n] {
             let fd = event.u64 as RawFd;
 
@@ -217,7 +216,7 @@ impl Reactor {
                 Self::drain_wake_fd(self.wake_fd);
                 continue;
             }
-            if let Some(reg) = regs.get_mut(&fd) {
+            if let Some(reg) = self.registrations.lock().unwrap().get_mut(&fd) {
                 if event.events & READABLE != 0 {
                     if let Some(waker) = reg.read_waker.take() {
                         waker.wake();
