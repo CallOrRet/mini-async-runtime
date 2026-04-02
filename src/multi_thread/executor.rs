@@ -338,7 +338,11 @@ fn drive_io(shared: &SharedState) {
         if shared.timers.has_pending() {
             Some(next_deadline.unwrap_or(Duration::from_millis(1)))
         } else {
-            None
+            // Use a bounded timeout instead of blocking indefinitely.
+            // With edge-triggered eventfd, a wake() that fires between the
+            // driver checking the ready queue and entering epoll_wait can be
+            // missed, causing an infinite block.
+            Some(Duration::from_millis(5))
         }
     };
 

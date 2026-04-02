@@ -217,7 +217,7 @@ impl Reactor {
                 Self::drain_wake_fd(self.wake_fd);
                 continue;
             }
-            let should_remove = if let Some(reg) = regs.get_mut(&fd) {
+            if let Some(reg) = regs.get_mut(&fd) {
                 if event.events & READABLE != 0 {
                     if let Some(waker) = reg.read_waker.take() {
                         waker.wake();
@@ -228,12 +228,6 @@ impl Reactor {
                         waker.wake();
                     }
                 }
-                reg.read_waker.is_none() && reg.write_waker.is_none()
-            } else {
-                false
-            };
-            if should_remove {
-                regs.remove(&fd);
             }
         }
 
