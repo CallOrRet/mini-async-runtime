@@ -200,37 +200,39 @@ impl TimerWheel {
     ///
     /// Must only be called by the driver thread (i.e. while holding the
     /// `driver_token`).
-    pub unsafe fn process(&self) -> Option<Duration> { unsafe {
-        let heap = &mut *self.heap.get();
+    pub unsafe fn process(&self) -> Option<Duration> {
+        unsafe {
+            let heap = &mut *self.heap.get();
 
-        // Drain inbox into heap (brief lock).
-        {
-            let mut inbox = self.inbox.lock().unwrap();
-            heap.extend(inbox.drain(..));
-        }
-
-        // Fire expired entries (no lock).
-        let now = Instant::now();
-        while let Some(entry) = heap.peek() {
-            if entry.deadline <= now {
-                let entry = heap.pop().unwrap();
-                entry.state.completed.store(true, Ordering::Release);
-                entry.state.waker.wake();
-            } else {
-                return Some(entry.deadline - now);
+            // Drain inbox into heap (brief lock).
+            {
+                let mut inbox = self.inbox.lock().unwrap();
+                heap.extend(inbox.drain(..));
             }
+
+            // Fire expired entries (no lock).
+            let now = Instant::now();
+            while let Some(entry) = heap.peek() {
+                if entry.deadline <= now {
+                    let entry = heap.pop().unwrap();
+                    entry.state.completed.store(true, Ordering::Release);
+                    entry.state.waker.wake();
+                } else {
+                    return Some(entry.deadline - now);
+                }
+            }
+            None
         }
-        None
-    }}
+    }
 
     /// Check if there are pending timers (inbox or heap).
     ///
     /// # Safety
     ///
     /// The heap check must only be called by the driver thread.
-    pub unsafe fn has_pending(&self) -> bool { unsafe {
-        !(*self.heap.get()).is_empty() || !self.inbox.lock().unwrap().is_empty()
-    }}
+    pub unsafe fn has_pending(&self) -> bool {
+        unsafe { !(*self.heap.get()).is_empty() || !self.inbox.lock().unwrap().is_empty() }
+    }
 }
 
 // ---------------------------------------------------------------------------

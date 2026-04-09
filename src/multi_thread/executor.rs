@@ -13,7 +13,7 @@
 //!              spawn / wake
 //! ┌──────┐   ──────────────▶  ┌───────────┐  worker dequeues  ┌─────────┐
 //! │ IDLE │                    │ SCHEDULED │ ────────────────▶ │ RUNNING │
-//! └──────┘  ◀────────────────  └───────────┘                  └────┬────┘
+//! └──────┘  ◀───────────────  └───────────┘                   └────┬────┘
 //!        poll returns Pending                                      │
 //!        & no wake during poll                              wake during poll
 //!                                                                  │
@@ -31,7 +31,7 @@ use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 use std::time::Duration;
 
 use super::net::SharedReactor;
-use super::task::{Task, IDLE, NOTIFIED, RUNNING, SCHEDULED};
+use super::task::{IDLE, NOTIFIED, RUNNING, SCHEDULED, Task};
 use super::timer::TimerWheel;
 
 pub(crate) use crate::next_task_id;
@@ -148,25 +148,31 @@ struct WakerData {
 const VTABLE: RawWakerVTable =
     RawWakerVTable::new(waker_clone, waker_wake, waker_wake_by_ref, waker_drop);
 
-unsafe fn waker_clone(ptr: *const ()) -> RawWaker { unsafe {
-    let data = &*(ptr as *const WakerData);
-    let cloned = Box::new(WakerData {
-        task_id: data.task_id,
-        task_state: data.task_state.clone(),
-        shared: data.shared.clone(),
-    });
-    RawWaker::new(Box::into_raw(cloned) as *const (), &VTABLE)
-}}
+unsafe fn waker_clone(ptr: *const ()) -> RawWaker {
+    unsafe {
+        let data = &*(ptr as *const WakerData);
+        let cloned = Box::new(WakerData {
+            task_id: data.task_id,
+            task_state: data.task_state.clone(),
+            shared: data.shared.clone(),
+        });
+        RawWaker::new(Box::into_raw(cloned) as *const (), &VTABLE)
+    }
+}
 
-unsafe fn waker_wake(ptr: *const ()) { unsafe {
-    let data = Box::from_raw(ptr as *mut WakerData);
-    wake_by_ref_impl(&data);
-}}
+unsafe fn waker_wake(ptr: *const ()) {
+    unsafe {
+        let data = Box::from_raw(ptr as *mut WakerData);
+        wake_by_ref_impl(&data);
+    }
+}
 
-unsafe fn waker_wake_by_ref(ptr: *const ()) { unsafe {
-    let data = &*(ptr as *const WakerData);
-    wake_by_ref_impl(data);
-}}
+unsafe fn waker_wake_by_ref(ptr: *const ()) {
+    unsafe {
+        let data = &*(ptr as *const WakerData);
+        wake_by_ref_impl(data);
+    }
+}
 
 /// Core wake logic: transition the task state and enqueue if needed.
 fn wake_by_ref_impl(data: &WakerData) {
@@ -201,9 +207,11 @@ fn wake_by_ref_impl(data: &WakerData) {
     }
 }
 
-unsafe fn waker_drop(ptr: *const ()) { unsafe {
-    let _ = Box::from_raw(ptr as *mut WakerData);
-}}
+unsafe fn waker_drop(ptr: *const ()) {
+    unsafe {
+        let _ = Box::from_raw(ptr as *mut WakerData);
+    }
+}
 
 pub(crate) fn make_waker(
     task_id: usize,
@@ -285,9 +293,7 @@ fn poll_task(task_id: usize, shared: &Arc<SharedState>) {
         return;
     }
 
-    // Build waker with a handle to the task's atomic state.
-    let waker = make_waker(task.id, task.state.clone(), shared.clone());
-    let mut cx = Context::from_waker(&waker);
+    let mut cx = Context::from_waker(task.waker());
 
     // SAFETY: we just CAS-ed into RUNNING — we are the only thread that
     // will touch the future until we leave RUNNING.

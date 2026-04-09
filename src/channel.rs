@@ -114,13 +114,15 @@ impl<'a, T> Future for Recv<'a, T> {
         let front = inner.queue.pop_front();
         match front {
             Some(value) => Poll::Ready(Some(value)),
-            _ => if inner.sender_count == 0 {
-                // Channel closed and buffer drained.
-                Poll::Ready(None)
-            } else {
-                inner.rx_waker = Some(cx.waker().clone());
-                Poll::Pending
-            },
+            _ => {
+                if inner.sender_count == 0 {
+                    // Channel closed and buffer drained.
+                    Poll::Ready(None)
+                } else {
+                    inner.rx_waker = Some(cx.waker().clone());
+                    Poll::Pending
+                }
+            }
         }
     }
 }

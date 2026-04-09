@@ -19,8 +19,11 @@ use std::{io, thread};
 
 use crate::reactor::Reactor;
 
-use super::executor::{self, next_task_id, SharedState};
+use std::sync::atomic::AtomicU8;
+
+use super::executor::{self, SharedState, next_task_id};
 use super::net::{SharedReactor, TcpListener, TcpStream};
+use super::task::SCHEDULED;
 use super::task::{self, Task, TaskState};
 use super::timer::{Sleep, TimerWheel};
 
@@ -82,7 +85,9 @@ impl MultiThreadRuntime {
             waker: None,
         }));
         let boxed = task::wrap_future_with_state(future, state.clone());
-        let task = Arc::new(Task::new(id, boxed));
+        let task_state = Arc::new(AtomicU8::new(SCHEDULED));
+        let waker = executor::make_waker(id, task_state.clone(), self.shared.clone());
+        let task = Arc::new(Task::new(id, boxed, task_state, waker));
         self.shared.spawn(task);
         super::task::JoinHandle { state }
     }
@@ -126,7 +131,9 @@ impl MultiThreadRuntime {
             *lock.lock().unwrap() = Some(result);
             cvar.notify_one();
         });
-        let task = Arc::new(Task::new(id, boxed));
+        let task_state = Arc::new(AtomicU8::new(SCHEDULED));
+        let waker = executor::make_waker(id, task_state.clone(), self.shared.clone());
+        let task = Arc::new(Task::new(id, boxed, task_state, waker));
         self.shared.spawn(task);
 
         // Park until the result appears.

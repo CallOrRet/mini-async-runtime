@@ -9,7 +9,7 @@ use std::future::Future;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use crate::executor::Executor;
+use crate::executor::{self, Executor};
 use crate::join_handle::JoinHandle;
 use crate::net;
 use crate::next_task_id;
@@ -60,7 +60,8 @@ impl Runtime {
             waker: None,
         }));
         let boxed = task::wrap_future_with_state(future, Rc::clone(&state));
-        let task = Rc::new(Task::new(id, boxed));
+        let waker = executor::make_waker(id, Rc::clone(&self.executor.ready_queue));
+        let task = Rc::new(Task::new(id, boxed, waker));
         self.executor.spawn(task);
         JoinHandle { state }
     }

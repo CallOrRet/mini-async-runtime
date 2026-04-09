@@ -10,14 +10,15 @@
 //! - JoinHandle await latency
 //! - channel scheduling interaction
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::future::Future;
+use std::hint::black_box;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use mini_async_runtime::multi_thread::MultiThreadRuntime;
 use mini_async_runtime::Runtime;
+use mini_async_runtime::multi_thread::MultiThreadRuntime;
 
 // ---------------------------------------------------------------------------
 // Helper futures
@@ -261,8 +262,8 @@ fn mt_cross_thread_wake(c: &mut Criterion) {
                 b.iter(|| {
                     let rt = MultiThreadRuntime::new(4).unwrap();
 
-                    use std::sync::atomic::{AtomicUsize, Ordering};
                     use std::sync::Arc;
+                    use std::sync::atomic::{AtomicUsize, Ordering};
                     let counter = Arc::new(AtomicUsize::new(0));
                     let target = rounds * 2;
 

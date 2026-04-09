@@ -2,6 +2,7 @@
 name = "mini-async-runtime"
 version = "0.1.0"
 edition = "2024"
+authors = ["CallOrRet <CallOrRet@icloud.com>"]
 description = "A minimal async runtime for Rust, inspired by tokio"
 license = "Apache-2.0"
 

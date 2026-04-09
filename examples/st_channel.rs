@@ -1,4 +1,4 @@
-use mini_async_runtime::{channel, Runtime};
+use mini_async_runtime::{Runtime, channel};
 
 fn main() {
     println!("--- ST: Channel ---");

@@ -11,7 +11,7 @@ use std::cell::RefCell;
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, Waker};
 
 /// The inner future type erased to a trait object.
 /// No `Send` bound — this is a single-threaded runtime.
@@ -38,15 +38,24 @@ pub(crate) struct Task {
     pub future: RefCell<BoxFuture>,
     /// Unique identifier for this task (used for scheduling).
     pub id: usize,
+    /// Pre-built waker that re-enqueues this task when woken.
+    /// Created once at spawn time and reused across polls.
+    waker: Waker,
 }
 
 impl Task {
     /// Create a new task wrapping a future that produces `()`.
-    pub fn new(id: usize, future: BoxFuture) -> Self {
+    pub fn new(id: usize, future: BoxFuture, waker: Waker) -> Self {
         Task {
             future: RefCell::new(future),
             id,
+            waker,
         }
+    }
+
+    /// Return a reference to the pre-built waker.
+    pub fn waker(&self) -> &Waker {
+        &self.waker
     }
 
     /// Poll the inner future. Returns `Poll::Ready(())` when done.

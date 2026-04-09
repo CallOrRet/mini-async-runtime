@@ -240,15 +240,15 @@ impl Reactor {
                     continue;
                 }
                 if let Some(reg) = regs.get_mut(&fd) {
-                    if event.events & READABLE != 0 {
-                        if let Some(waker) = reg.read_waker.take() {
-                            wakers.push(waker);
-                        }
+                    if event.events & READABLE != 0
+                        && let Some(waker) = reg.read_waker.take()
+                    {
+                        wakers.push(waker);
                     }
-                    if event.events & WRITABLE != 0 {
-                        if let Some(waker) = reg.write_waker.take() {
-                            wakers.push(waker);
-                        }
+                    if event.events & WRITABLE != 0
+                        && let Some(waker) = reg.write_waker.take()
+                    {
+                        wakers.push(waker);
                     }
                 }
             }

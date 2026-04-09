@@ -43,6 +43,9 @@ pub(crate) struct Task {
     future: UnsafeCell<BoxFuture>,
     /// Atomic state shared with wakers via `Arc<AtomicU8>`.
     pub state: Arc<AtomicU8>,
+    /// Pre-built waker that re-schedules this task when woken.
+    /// Created once at spawn time and reused across polls.
+    waker: Waker,
 }
 
 // SAFETY: The `UnsafeCell<BoxFuture>` is only dereferenced when the task
@@ -52,12 +55,18 @@ unsafe impl Send for Task {}
 unsafe impl Sync for Task {}
 
 impl Task {
-    pub fn new(id: usize, future: BoxFuture) -> Self {
+    pub fn new(id: usize, future: BoxFuture, state: Arc<AtomicU8>, waker: Waker) -> Self {
         Task {
             id,
             future: UnsafeCell::new(future),
-            state: Arc::new(AtomicU8::new(SCHEDULED)),
+            state,
+            waker,
         }
+    }
+
+    /// Return a reference to the pre-built waker.
+    pub fn waker(&self) -> &Waker {
+        &self.waker
     }
 
     /// Poll the future.
@@ -66,10 +75,12 @@ impl Task {
     ///
     /// The caller **must** have transitioned `state` to [`RUNNING`] via a
     /// successful CAS.  No other thread may access the future concurrently.
-    pub unsafe fn poll(&self, cx: &mut Context<'_>) -> Poll<()> { unsafe {
-        let fut = &mut *self.future.get();
-        fut.as_mut().poll(cx)
-    }}
+    pub unsafe fn poll(&self, cx: &mut Context<'_>) -> Poll<()> {
+        unsafe {
+            let fut = &mut *self.future.get();
+            fut.as_mut().poll(cx)
+        }
+    }
 }
 
 // ---- Helpers ----
