@@ -66,10 +66,10 @@ impl Task {
     ///
     /// The caller **must** have transitioned `state` to [`RUNNING`] via a
     /// successful CAS.  No other thread may access the future concurrently.
-    pub unsafe fn poll(&self, cx: &mut Context<'_>) -> Poll<()> {
+    pub unsafe fn poll(&self, cx: &mut Context<'_>) -> Poll<()> { unsafe {
         let fut = &mut *self.future.get();
         fut.as_mut().poll(cx)
-    }
+    }}
 }
 
 // ---- Helpers ----
@@ -105,11 +105,13 @@ impl<T> Future for JoinHandle<T> {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<T> {
         let mut state = self.state.lock().unwrap();
-        if let Some(val) = state.result.take() {
-            Poll::Ready(val)
-        } else {
-            state.waker = Some(cx.waker().clone());
-            Poll::Pending
+        let result = state.result.take();
+        match result {
+            Some(val) => Poll::Ready(val),
+            _ => {
+                state.waker = Some(cx.waker().clone());
+                Poll::Pending
+            }
         }
     }
 }

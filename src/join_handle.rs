@@ -30,12 +30,14 @@ impl<T> Future for JoinHandle<T> {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut state = self.state.borrow_mut();
-        if let Some(result) = state.result.take() {
-            Poll::Ready(result)
-        } else {
-            // Register the waker so we get notified when the task finishes.
-            state.waker = Some(cx.waker().clone());
-            Poll::Pending
+        let result = state.result.take();
+        match result {
+            Some(result) => Poll::Ready(result),
+            _ => {
+                // Register the waker so we get notified when the task finishes.
+                state.waker = Some(cx.waker().clone());
+                Poll::Pending
+            }
         }
     }
 }

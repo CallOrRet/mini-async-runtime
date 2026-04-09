@@ -108,7 +108,6 @@ loop {
 ```
 src/
 ├── lib.rs              # Public API, re-exports, tests
-├── main.rs             # Usage examples (single + multi-threaded)
 ├── runtime.rs          # Single-threaded Runtime (block_on, spawn, sleep)
 ├── executor.rs         # Single-threaded executor + RawWaker
 ├── task.rs             # Single-threaded Task (Rc<RefCell>)
@@ -145,10 +144,34 @@ Without it, the driver must use short timeout polling (5ms) to stay responsive,
 adding latency. The eventfd lets any thread instantly interrupt `epoll_wait`,
 so the driver can block indefinitely and still respond in microseconds.
 
+## Examples
+
+Individual examples are available in the `examples/` directory:
+
+| Example | Description |
+| ------- | ----------- |
+| `st_basic` | Basic `block_on` |
+| `st_spawn` | Spawn tasks & JoinHandle |
+| `st_sleep` | Timer / sleep |
+| `st_channel` | MPSC channel |
+| `st_tcp_echo` | TCP echo server & client |
+| `mt_basic` | Multi-threaded `block_on` |
+| `mt_spawn` | Multi-threaded spawn & join |
+| `mt_sleep` | Multi-threaded timer |
+| `mt_channel` | Multi-threaded channel (std::sync::mpsc) |
+| `mt_tcp_echo` | Multi-threaded TCP echo |
+| `mt_parallel_compute` | True parallelism across worker threads |
+
+Run a single example:
+
+```bash
+cargo run --example st_basic
+cargo run --example mt_tcp_echo
+```
+
 ## Running
 
 ```bash
-cargo run          # Run all examples
 cargo test         # Run all 20 tests
 cargo clippy       # Lint check
 ```

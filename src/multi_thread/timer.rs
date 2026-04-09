@@ -200,7 +200,7 @@ impl TimerWheel {
     ///
     /// Must only be called by the driver thread (i.e. while holding the
     /// `driver_token`).
-    pub unsafe fn process(&self) -> Option<Duration> {
+    pub unsafe fn process(&self) -> Option<Duration> { unsafe {
         let heap = &mut *self.heap.get();
 
         // Drain inbox into heap (brief lock).
@@ -221,16 +221,16 @@ impl TimerWheel {
             }
         }
         None
-    }
+    }}
 
     /// Check if there are pending timers (inbox or heap).
     ///
     /// # Safety
     ///
     /// The heap check must only be called by the driver thread.
-    pub unsafe fn has_pending(&self) -> bool {
+    pub unsafe fn has_pending(&self) -> bool { unsafe {
         !(*self.heap.get()).is_empty() || !self.inbox.lock().unwrap().is_empty()
-    }
+    }}
 }
 
 // ---------------------------------------------------------------------------

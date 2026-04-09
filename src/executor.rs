@@ -94,31 +94,31 @@ const VTABLE: RawWakerVTable =
     RawWakerVTable::new(waker_clone, waker_wake, waker_wake_by_ref, waker_drop);
 
 /// Clone: allocate a new `WakerData` with the same contents.
-unsafe fn waker_clone(ptr: *const ()) -> RawWaker {
+unsafe fn waker_clone(ptr: *const ()) -> RawWaker { unsafe {
     let data = &*(ptr as *const WakerData);
     let cloned = Box::new(WakerData {
         task_id: data.task_id,
         queue: Rc::clone(&data.queue),
     });
     RawWaker::new(Box::into_raw(cloned) as *const (), &VTABLE)
-}
+}}
 
 /// Wake (by value): enqueue the task and free the WakerData.
-unsafe fn waker_wake(ptr: *const ()) {
+unsafe fn waker_wake(ptr: *const ()) { unsafe {
     let data = Box::from_raw(ptr as *mut WakerData);
     data.queue.borrow_mut().push(data.task_id);
-}
+}}
 
 /// Wake by reference: enqueue the task but do NOT free the WakerData.
-unsafe fn waker_wake_by_ref(ptr: *const ()) {
+unsafe fn waker_wake_by_ref(ptr: *const ()) { unsafe {
     let data = &*(ptr as *const WakerData);
     data.queue.borrow_mut().push(data.task_id);
-}
+}}
 
 /// Drop: free the WakerData.
-unsafe fn waker_drop(ptr: *const ()) {
+unsafe fn waker_drop(ptr: *const ()) { unsafe {
     drop(Box::from_raw(ptr as *mut WakerData));
-}
+}}
 
 // ---------------------------------------------------------------------------
 // Executor

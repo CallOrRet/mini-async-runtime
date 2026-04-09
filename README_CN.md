@@ -107,7 +107,6 @@ loop {
 ```
 src/
 ├── lib.rs              # 公共 API、re-exports、测试
-├── main.rs             # 使用示例（单线程 + 多线程）
 ├── runtime.rs          # 单线程 Runtime（block_on, spawn, sleep）
 ├── executor.rs         # 单线程 executor + RawWaker
 ├── task.rs             # 单线程 Task（Rc<RefCell>）
@@ -145,10 +144,34 @@ src/
 eventfd 让任意线程能即时打断 `epoll_wait`，driver 可以无限阻塞但仍在
 微秒级响应新任务。
 
+## 示例
+
+所有示例位于 `examples/` 目录：
+
+| 示例 | 说明 |
+| ---- | ---- |
+| `st_basic` | 基本 `block_on` |
+| `st_spawn` | 任务 spawn 与 JoinHandle |
+| `st_sleep` | 定时器 / sleep |
+| `st_channel` | MPSC 通道 |
+| `st_tcp_echo` | TCP echo 服务端与客户端 |
+| `mt_basic` | 多线程 `block_on` |
+| `mt_spawn` | 多线程 spawn 与 join |
+| `mt_sleep` | 多线程定时器 |
+| `mt_channel` | 多线程通道（std::sync::mpsc） |
+| `mt_tcp_echo` | 多线程 TCP echo |
+| `mt_parallel_compute` | 跨 worker 线程的真正并行计算 |
+
+运行单个示例：
+
+```bash
+cargo run --example st_basic
+cargo run --example mt_tcp_echo
+```
+
 ## 运行
 
 ```bash
-cargo run          # 运行所有示例
 cargo test         # 运行全部 20 个测试
 cargo clippy       # lint 检查
 ```

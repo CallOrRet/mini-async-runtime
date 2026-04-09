@@ -99,7 +99,7 @@ impl Runtime {
     pub fn tcp_connect<A: std::net::ToSocketAddrs + 'static>(
         &self,
         addr: A,
-    ) -> impl Future<Output = std::io::Result<net::TcpStream>> {
+    ) -> impl Future<Output = std::io::Result<net::TcpStream>> + use<A> {
         let reactor = self.reactor.clone();
         async move { net::TcpStream::connect_with_reactor(addr, reactor).await }
     }
@@ -133,7 +133,8 @@ impl Runtime {
             // 2. Check if our top-level future is done (only if woken).
             if handle_woken.get() {
                 handle_woken.set(false);
-                if let std::task::Poll::Ready(val) = handle.as_mut().poll(&mut cx) {
+                let poll = handle.as_mut().poll(&mut cx);
+                if let std::task::Poll::Ready(val) = poll {
                     return val;
                 }
             }
@@ -142,21 +143,27 @@ impl Runtime {
             //    to avoid spinning forever.
             if self.executor.is_empty() {
                 // The root task finished — result must be stored.
-                if let std::task::Poll::Ready(val) = handle.as_mut().poll(&mut cx) {
+                let poll = handle.as_mut().poll(&mut cx);
+                if let std::task::Poll::Ready(val) = poll {
                     return val;
                 }
             }
 
             // 4. Process timers and compute how long we can sleep.
-            let timer_timeout = self.timers.borrow_mut().process();
+            let timer_timeout = {
+                let mut timers = self.timers.borrow_mut();
+                timers.process()
+            };
 
             // 5. If there are ready tasks after timer processing, skip blocking.
-            if !self.executor.ready_queue.borrow().is_empty() {
+            let ready_empty = self.executor.ready_queue.borrow().is_empty();
+            if !ready_empty {
                 continue;
             }
 
             // 6. Block on the reactor for I/O events (with a timeout).
-            let timeout = if self.timers.borrow().has_pending() {
+            let has_pending = self.timers.borrow().has_pending();
+            let timeout = if has_pending {
                 // Don't block longer than the next timer deadline.
                 Some(timer_timeout.unwrap_or(Duration::from_millis(1)))
             } else if self.executor.is_empty() {
@@ -171,11 +178,14 @@ impl Runtime {
             let _ = self.reactor.poll(timeout);
 
             // 7. Process timers again after sleeping.
-            self.timers.borrow_mut().process();
+            let mut timers = self.timers.borrow_mut();
+            timers.process();
+            drop(timers);
         }
 
         // Final attempt to extract the result.
-        match handle.as_mut().poll(&mut cx) {
+        let poll = handle.as_mut().poll(&mut cx);
+        match poll {
             std::task::Poll::Ready(val) => val,
             std::task::Poll::Pending => {
                 panic!("block_on: future did not complete and no tasks remain")

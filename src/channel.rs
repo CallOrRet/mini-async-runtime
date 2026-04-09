@@ -111,14 +111,16 @@ impl<'a, T> Future for Recv<'a, T> {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut inner = self.receiver.inner.borrow_mut();
-        if let Some(value) = inner.queue.pop_front() {
-            Poll::Ready(Some(value))
-        } else if inner.sender_count == 0 {
-            // Channel closed and buffer drained.
-            Poll::Ready(None)
-        } else {
-            inner.rx_waker = Some(cx.waker().clone());
-            Poll::Pending
+        let front = inner.queue.pop_front();
+        match front {
+            Some(value) => Poll::Ready(Some(value)),
+            _ => if inner.sender_count == 0 {
+                // Channel closed and buffer drained.
+                Poll::Ready(None)
+            } else {
+                inner.rx_waker = Some(cx.waker().clone());
+                Poll::Pending
+            },
         }
     }
 }
