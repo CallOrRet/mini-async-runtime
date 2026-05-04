@@ -218,16 +218,30 @@ impl Reactor {
     pub fn poll(&self, timeout: Option<Duration>) -> io::Result<()> {
         let timeout_ms = match timeout {
             None => -1,
-            Some(d) => d.as_millis().min(i32::MAX as u128) as i32,
+            Some(d) if d.is_zero() => 0,
+            // Round any non-zero sub-millisecond duration up to 1ms so that
+            // e.g. `Duration::from_micros(500)` doesn't degenerate into a
+            // zero-timeout call that busy-spins.
+            Some(d) => {
+                let ns = d.as_nanos();
+                let ms = ns.div_ceil(1_000_000);
+                ms.min(i32::MAX as u128) as i32
+            }
         };
 
         // 1. Block on epoll — NO lock held.
         let mut events = [libc::epoll_event { events: 0, u64: 0 }; 64];
         let n = self.epoll.wait(&mut events, timeout_ms)?;
 
+        // 2. Collect wakers under the lock, then call them after releasing
         //    it.  This avoids calling arbitrary waker code while holding the
         //    registrations mutex, preventing potential deadlocks if a waker
         //    implementation ever needs to re-enter the reactor.
+        //
+        //    Because we use EPOLLONESHOT, an fd is disabled in the kernel
+        //    after one event.  If the fd had *both* read and write interest
+        //    registered but only one direction fired, we must re-arm with
+        //    the surviving direction or that side's task is stranded.
         let wakers_to_wake = {
             let mut regs = self.registrations.lock().unwrap();
             let mut wakers = Vec::with_capacity(events.len());
@@ -239,17 +253,50 @@ impl Reactor {
                     Self::drain_wake_fd(self.wake_fd);
                     continue;
                 }
-                if let Some(reg) = regs.get_mut(&fd) {
-                    if event.events & READABLE != 0
-                        && let Some(waker) = reg.read_waker.take()
-                    {
-                        wakers.push(waker);
-                    }
-                    if event.events & WRITABLE != 0
-                        && let Some(waker) = reg.write_waker.take()
-                    {
-                        wakers.push(waker);
-                    }
+
+                let Some(reg) = regs.get_mut(&fd) else {
+                    continue;
+                };
+
+                // EPOLLERR / EPOLLHUP are reported regardless of the mask;
+                // wake all interested parties so they observe the error
+                // through their next read/write syscall.
+                let err_or_hup =
+                    event.events & (libc::EPOLLERR | libc::EPOLLHUP) as u32 != 0;
+
+                if (event.events & READABLE != 0 || err_or_hup)
+                    && let Some(waker) = reg.read_waker.take()
+                {
+                    wakers.push(waker);
+                }
+                if (event.events & WRITABLE != 0 || err_or_hup)
+                    && let Some(waker) = reg.write_waker.take()
+                {
+                    wakers.push(waker);
+                }
+
+                // Re-arm any direction whose waker is still registered.
+                // We keep the map entry either way: the fd remains in the
+                // kernel's interest list (just disabled by ONESHOT), so a
+                // future register call uses EPOLL_CTL_MOD as expected.
+                let mut remaining = 0u32;
+                if reg.read_waker.is_some() {
+                    remaining |= READABLE;
+                }
+                if reg.write_waker.is_some() {
+                    remaining |= WRITABLE;
+                }
+                if remaining != 0 {
+                    remaining |= libc::EPOLLET as u32 | libc::EPOLLONESHOT as u32;
+                    // Best-effort: if rearm fails (e.g. fd was closed) the
+                    // surviving task will likely observe the error on its
+                    // next read/write syscall, or the user will deregister.
+                    let _ = self.epoll.ctl(
+                        libc::EPOLL_CTL_MOD,
+                        fd,
+                        remaining,
+                        fd as u64,
+                    );
                 }
             }
             wakers
@@ -286,4 +333,142 @@ pub(crate) type SharedReactor = Rc<Reactor>;
 /// Create a new shared reactor.
 pub(crate) fn new_shared_reactor() -> io::Result<SharedReactor> {
     Ok(Rc::new(Reactor::new()?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use std::task::Wake;
+
+    struct CountWaker(AtomicUsize);
+
+    impl CountWaker {
+        fn count(&self) -> usize {
+            self.0.load(AtomicOrdering::SeqCst)
+        }
+    }
+
+    impl Wake for CountWaker {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, AtomicOrdering::SeqCst);
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, AtomicOrdering::SeqCst);
+        }
+    }
+
+    /// Make a non-blocking AF_UNIX socketpair, returning `(fd_a, fd_b)`.
+    fn nonblocking_socketpair() -> (RawFd, RawFd) {
+        let mut fds = [0i32; 2];
+        let ret = unsafe {
+            libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr())
+        };
+        assert_eq!(ret, 0, "socketpair failed");
+        for fd in fds {
+            let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+            assert!(flags >= 0);
+            let r = unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
+            assert_eq!(r, 0);
+        }
+        (fds[0], fds[1])
+    }
+
+    fn close(fd: RawFd) {
+        unsafe {
+            libc::close(fd);
+        }
+    }
+
+    /// Regression test for the ET+ONESHOT rearm bug: when an fd has both
+    /// read and write interest registered and only one direction fires,
+    /// the other direction must remain armed.
+    ///
+    /// Pre-fix behaviour: after the first poll consumes the write_waker,
+    /// the fd stays disabled in the kernel (ONESHOT) and the read_waker
+    /// is never woken even after data arrives. This test would hang or
+    /// fail on the second `poll()`.
+    #[test]
+    fn rearm_other_direction_when_only_one_event_fires() {
+        let (fd_a, fd_b) = nonblocking_socketpair();
+        let reactor = Reactor::new().unwrap();
+
+        let read_w = Arc::new(CountWaker(AtomicUsize::new(0)));
+        let write_w = Arc::new(CountWaker(AtomicUsize::new(0)));
+
+        reactor
+            .register_readable(fd_a, Waker::from(read_w.clone()))
+            .unwrap();
+        reactor
+            .register_writable(fd_a, Waker::from(write_w.clone()))
+            .unwrap();
+
+        // Fresh AF_UNIX stream socket: writable, not readable. The first
+        // epoll_wait reports EPOLLOUT only.
+        reactor.poll(Some(Duration::from_millis(100))).unwrap();
+        assert_eq!(write_w.count(), 1, "writable side should fire");
+        assert_eq!(read_w.count(), 0, "no data yet — read shouldn't fire");
+
+        // Make fd_a readable.
+        let n = unsafe {
+            libc::write(fd_b, b"x".as_ptr() as *const libc::c_void, 1)
+        };
+        assert_eq!(n, 1);
+
+        // The read_waker must still be armed. Without the rearm fix, the
+        // kernel still has fd_a in EPOLL_CTL_DISABLED-by-ONESHOT state and
+        // this poll would time out without firing the read waker.
+        reactor.poll(Some(Duration::from_millis(200))).unwrap();
+        assert_eq!(
+            read_w.count(),
+            1,
+            "rearm regression: read waker stranded by oneshot"
+        );
+
+        let _ = reactor.deregister(fd_a);
+        close(fd_a);
+        close(fd_b);
+    }
+
+    /// Sanity: `wake()` from another thread breaks a blocking `poll()`.
+    #[test]
+    fn wake_breaks_blocking_poll() {
+        let reactor = Arc::new(Reactor::new().unwrap());
+        let r2 = reactor.clone();
+        let handle = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            r2.wake();
+        });
+
+        let start = std::time::Instant::now();
+        // Block "forever"; should be interrupted by wake() ~20ms in.
+        reactor.poll(None).unwrap();
+        let elapsed = start.elapsed();
+        handle.join().unwrap();
+
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "wake() did not interrupt poll: {elapsed:?}"
+        );
+    }
+
+    /// Sub-millisecond timeouts should not degenerate into a busy spin.
+    #[test]
+    fn submillisecond_timeout_does_not_busy_spin() {
+        let reactor = Reactor::new().unwrap();
+        // 10 polls of 500µs each. Pre-fix: each rounds down to 0ms and
+        // returns immediately, so the total is near-zero CPU time but
+        // performs 10 syscalls with no wait. Post-fix: each rounds up
+        // to 1ms, so the total is at least ~10ms of actual sleeping.
+        let start = std::time::Instant::now();
+        for _ in 0..10 {
+            reactor.poll(Some(Duration::from_micros(500))).unwrap();
+        }
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(5),
+            "sub-ms timeout regressed to busy-spin: {elapsed:?}"
+        );
+    }
 }

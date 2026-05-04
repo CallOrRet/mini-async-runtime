@@ -95,7 +95,14 @@ impl MultiThreadRuntime {
     /// Create a [`Sleep`] future that resolves after `duration`.
     pub fn sleep(&self, duration: Duration) -> Sleep {
         let deadline = Instant::now() + duration;
-        self.shared.timers.register(deadline)
+        let sleep = self.shared.timers.register(deadline);
+        // If a worker is currently the I/O driver and is blocked in
+        // `epoll_wait`, its timeout was computed before this timer existed.
+        // Poke the reactor so it returns and recomputes the next deadline.
+        // The eventfd is level-triggered, so this is also safe if no driver
+        // is currently blocked.
+        self.shared.reactor.wake();
+        sleep
     }
 
     /// Bind a TCP listener to the given address.

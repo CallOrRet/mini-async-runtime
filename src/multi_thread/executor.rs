@@ -252,10 +252,24 @@ pub(crate) fn run_worker(shared: Arc<SharedState>) {
         // 2. No tasks — try to become the I/O driver.
         if shared
             .driver_token
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
             .is_ok()
         {
-            drive_io(&shared);
+            // Race protection: between observing the queue as empty in
+            // step 1 and taking the driver token here, another thread
+            // could have enqueued a task while seeing driver_token=false
+            // (so it skipped `reactor.wake()`). If we entered epoll_wait
+            // now, that task would idle for up to the timeout.
+            //
+            // Re-checking the ready queue under its mutex synchronizes
+            // our token CAS with the enqueuing thread's token load via
+            // the lock's release-acquire chain — if they pushed before
+            // our re-check, we see it; otherwise their `wake()` call
+            // (now visible to them) pokes the reactor.
+            let queue_empty = shared.ready_queue.lock().unwrap().is_empty();
+            if queue_empty {
+                drive_io(&shared);
+            }
             shared.driver_token.store(false, Ordering::Release);
             continue;
         }
